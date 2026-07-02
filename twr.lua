@@ -1,11 +1,14 @@
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
-local HttpService = game:GetService("HttpService")
-
 local CONFIG = {
     MaxVisible = 5, MaxDistance = 70, UpdateInterval = 0.022, ScanInterval = 0.5,
-    TextSize = 18, HeadSize = 5, StaffCheckInterval = 30, StaffGroupId = 2838077,
-    MinStaffRank = 250, ZombieUpdateInterval = 0.5, TextYOffset = 15,
+    TextSize = 18, HeadSize = 5,
+
+    StaffCheckInterval = 1,
+    StaffGroupId = 2838077,
+    MinStaffRank = 250,
+
+    ZombieUpdateInterval = 0.5, TextYOffset = 15,
     CircleSegments = 16, CircleRadius = 1.8, CircleYOffset = 1.0, FadeDistance = 40,
     CacheClearInterval = 1800, CircleThickness = 2,
 }
@@ -61,7 +64,11 @@ local function isValidItemPart(part)
 end
 
 local function getPartPosition(part)
-
+    local ok, pos = pcall(function()
+        return part.Position
+    end)
+    return ok and pos or nil
+end
 local function removeItemEntry(index)
     removeDrawing(State.Labels[index])
 
@@ -342,108 +349,101 @@ local function updateZombieHeads()
     end
 end
 
-local UserIdOffset = nil
-
-local function loadUserIdOffset()
-    if UserIdOffset then return UserIdOffset end
-
-    local urls = {
-        "https://imtheo.lol/Offsets/Offsets.json",
-        "https://api.codetabs.com/v1/proxy?quest=https://imtheo.lol/Offsets/Offsets.json",
-        "https://imtheo.lol/Offsets/OffsetsHex.json",
-    }
-
-    local data, body
-    for _, url in ipairs(urls) do
-        local ok, result = pcall(httpget, url)
-        if ok and result and result ~= "" then
-            body = result
-            local okJson, decoded = pcall(function() return HttpService:JSONDecode(result) end)
-            if okJson then data = decoded end
-            break
-        end
-    end
-
-    if data then
-        if data.Player and data.Player.UserId then
-            UserIdOffset = tonumber(data.Player.UserId)
-        elseif data.Offsets and data.Offsets.Player and data.Offsets.Player.UserId then
-            local v = data.Offsets.Player.UserId
-            UserIdOffset = type(v) == "string" and tonumber(v, 16) or tonumber(v)
-        end
-    end
-
-    if not UserIdOffset and body then
-        local dec = body:match('"Player"%s*:%s*{.-"UserId"%s*:%s*(%d+)')
-        if dec then
-            UserIdOffset = tonumber(dec)
-        else
-            local hex = body:match('"Player"%s*:%s*{.-"UserId"%s*:%s*"0x([%da-fA-F]+)"')
-            if hex then UserIdOffset = tonumber(hex, 16) end
-        end
-    end
-
-    return UserIdOffset
-end
-
-local function getUserId(p) local o=loadUserIdOffset() if not o or not p or not p.Address then return nil end local ok,u=pcall(memory_read,"uintptr_t",p.Address+o) return (ok and u and u~=0) and u or nil end
+local KnownPlayers = {}
+local LastPlayerList
 
 local function getGroupRank(userId)
     if State.RankCache[userId] then
         return State.RankCache[userId].rank, State.RankCache[userId].role
     end
-    
-    local url = "https://groups.roblox.com/v2/users/" .. userId .. "/groups/roles"
-    local success, response = pcall(httpget, url)
-    if not success or response == "" then
-        State.RankCache[userId] = {rank = 0, role = "Unknown"}
-        return 0, "Unknown"
-    end
-    
-    local ok, data = pcall(function() return HttpService:JSONDecode(response) end)
-    if not ok or not data or not data.data then
-        State.RankCache[userId] = {rank = 0, role = "Unknown"}
-        return 0, "Unknown"
-    end
-    
-    for _, group in pairs(data.data) do
-        if group.group and group.group.id == CONFIG.StaffGroupId then
-            State.RankCache[userId] = {rank = group.role.rank, role = group.role.name}
-            return group.role.rank, group.role.name
-        end
-    end
+
+    local ok, response = pcall(function()
+        return game:HttpGet("https://groups.roblox.com/v2/users/" .. userId .. "/groups/roles")
+    end)
+
+if not ok or not response or response == "" then
     State.RankCache[userId] = {rank = 0, role = "Unknown"}
     return 0, "Unknown"
 end
 
-loadUserIdOffset()
+    for entry in response:gmatch('{"group".-"role".-}') do
+        local idStr = entry:match('"group".-"id"%s*:%s*(%d+)')
+        local rankStr = entry:match('"rank"%s*:%s*(%d+)')
+        local nameStr = entry:match('"role".-"name"%s*:%s*"([^"]+)"')
+
+        if idStr and tonumber(idStr) == CONFIG.StaffGroupId then
+            local rank = tonumber(rankStr) or 0
+            local role = nameStr or "Unknown"
+
+            State.RankCache[userId] = { rank = rank, role = role }
+            return rank, role
+        end
+    end
+
+    State.RankCache[userId] = { rank = 0, role = "Unknown" }
+    return 0, "Unknown"
+end
+
+local function showStaffAlert(playerName, roleName, duration)
+    duration = duration or 6
+    if notify then
+        pcall(function()
+            notify(playerName .. " is in the server! " .. roleName, "Staff Detected", duration)
+        end)
+    end
+end
+
+local function handlePlayer(player)
+    local userId = player.UserId
+    if not userId then return end
+    if KnownPlayers[userId] then return end
+
+    KnownPlayers[userId] = player.Name
+
+    task.spawn(function()
+        local rank, roleName = getGroupRank(userId)
+        if rank >= CONFIG.MinStaffRank then
+            showStaffAlert(player.Name, roleName)
+        end
+    end)
+end
 
 local function updateStaffCheck()
     if _G.MatchaItemScript_RunId ~= State.RunId then return end
-    
-    local staffNames = {}
-    for _, player in ipairs(Players:GetPlayers()) do
-        local userId = getUserId(player)
+
+    local present = {}
+    local players = Players:GetPlayers()
+    local playerList = ""
+
+    for index, player in ipairs(players) do
+        if index > 1 then playerList = playerList .. ", " end
+        playerList = playerList .. player.Name
+    end
+
+    if playerList == "" then playerList = "None" end
+
+    if playerList ~= LastPlayerList then
+        LastPlayerList = playerList
+        print("[Staff Detector] CHECKING " .. #players .. " PLAYER(S) | " .. playerList)
+    end
+
+    for _, player in ipairs(players) do
+        local userId = player.UserId
         if userId then
-            local rank, roleName = getGroupRank(userId)
-            if rank >= CONFIG.MinStaffRank then
-                table.insert(staffNames, player.Name .. " (" .. roleName .. ")")
-            end
+            present[userId] = true
+            handlePlayer(player)
         end
     end
-    
-    local staffString = table.concat(staffNames, ", ")
-    local previous = State.LastStaffString
-    
-    if staffString ~= previous then
-        State.LastStaffString = staffString
-        if staffString ~= "" and notify then
-            pcall(function() notify("Staff Online (" .. #staffNames .. ")", staffString, 10) end)
-        elseif staffString == "" and previous ~= "" and notify then
-            pcall(function() notify("Staff Online", "No staff members online", 10) end)
+
+    for userId in pairs(KnownPlayers) do
+        if not present[userId] then
+            KnownPlayers[userId] = nil
         end
     end
 end
+
+updateStaffCheck()
+print("[Staff Detector] Ready.")
 
 loop(CONFIG.CacheClearInterval, function() table.clear(State.RankCache) end)
 loop(CONFIG.ScanInterval, scanItems)
