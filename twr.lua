@@ -8,10 +8,9 @@ local LocalPlayer = Players.LocalPlayer
 local CONFIG = {
 	MaxVisible = 5,
 	MaxDistance = 75,
-	UpdateInterval = 0.03,
+	RenderInterval = 0.04,
 	ScanInterval = 0.5,
 	TextSize = 18,
-	HeadSize = 5,
 	StaffCheckInterval = 1,
 	StaffGroupId = 2838077,
 	MinStaffRank = 250,
@@ -19,13 +18,14 @@ local CONFIG = {
 	RankRefreshInterval = 5,
 	RankRetryInterval = 60,
 	RefreshAllOnStart = true,
-	ZombieUpdateInterval = 0.5,
 	TextYOffset = 15,
 	CircleSegments = 16,
 	CircleRadius = 1.8,
 	CircleYOffset = 1.0,
 	FadeDistance = 40,
 	CircleThickness = 2,
+	HeadSize = 5,
+	ZombieUpdateInterval = 0.5,
 }
 
 local ITEM_META = {
@@ -49,30 +49,30 @@ for i = 1, Segments do
 	CircleOffsets[i] = Vector3.new(math.cos(a) * CONFIG.CircleRadius, 0, math.sin(a) * CONFIG.CircleRadius)
 end
 local CircleOffsetY = CONFIG.CircleYOffset
-local TargetHeadSize = Vector3.new(CONFIG.HeadSize, CONFIG.HeadSize, CONFIG.HeadSize)
 local FadeMul = (1 / 3.5714285714) / CONFIG.FadeDistance
 
-local MainRunId = (_G.MatchaItemScript_RunId or 0) + 1
-_G.MatchaItemScript_RunId = MainRunId
+local OldRunId = _G.TWR_Patched_RunId or 0
+local MainRunId = OldRunId + 1
+_G.TWR_Patched_RunId = MainRunId
 
-if _G.MatchaItemScript_RenderConn then
-	pcall(function() _G.MatchaItemScript_RenderConn:Disconnect() end)
+if _G.TWR_Patched_RenderConn then
+	pcall(function() _G.TWR_Patched_RenderConn:Disconnect() end)
 end
-_G.MatchaItemScript_RenderConn = nil
+_G.TWR_Patched_RenderConn = nil
 
-if _G.MatchaItemScript_Labels then
-	for _, d in ipairs(_G.MatchaItemScript_Labels) do
+if _G.TWR_Patched_Labels then
+	for _, d in ipairs(_G.TWR_Patched_Labels) do
 		pcall(function() d.Visible = false; d:Remove() end)
 	end
 end
-_G.MatchaItemScript_Labels = {}
+_G.TWR_Patched_Labels = {}
 
-if _G.MatchaItemScript_Circles then
-	for _, d in ipairs(_G.MatchaItemScript_Circles) do
+if _G.TWR_Patched_Circles then
+	for _, d in ipairs(_G.TWR_Patched_Circles) do
 		pcall(function() d.Visible = false; d:Remove() end)
 	end
 end
-_G.MatchaItemScript_Circles = {}
+_G.TWR_Patched_Circles = {}
 
 local State = {
 	Items = {},
@@ -81,8 +81,8 @@ local State = {
 	ZombieHeads = {},
 	RankCache = {},
 	LastStaffKey = nil,
-	ProjEpoch = 0,
 	Pool = {},
+	TopK = {},
 }
 
 local cachedChar, cachedHRP
@@ -135,9 +135,9 @@ end
 
 local function loop(interval, func)
 	task.spawn(function()
-		while _G.MatchaItemScript_RunId == MainRunId do
+		while _G.TWR_Patched_RunId == MainRunId do
 			task.wait(interval)
-			if _G.MatchaItemScript_RunId ~= MainRunId then break end
+			if _G.TWR_Patched_RunId ~= MainRunId then break end
 			pcall(func)
 		end
 	end)
@@ -150,7 +150,7 @@ local function newLine()
 	l.From = Vector2.new(0, 0)
 	l.To = Vector2.new(0, 0)
 	l.Thickness = CONFIG.CircleThickness
-	table.insert(_G.MatchaItemScript_Circles, l)
+	table.insert(_G.TWR_Patched_Circles, l)
 	return l
 end
 
@@ -163,7 +163,7 @@ local function newSlot()
 		slot.label.Center = true
 		slot.label.Outline = true
 		slot.label.Visible = false
-		table.insert(_G.MatchaItemScript_Labels, slot.label)
+		table.insert(_G.TWR_Patched_Labels, slot.label)
 	end
 	local circle = {}
 	for _ = 1, Segments do
@@ -184,18 +184,15 @@ local function newSlot()
 	slot.alpha = 1
 	slot.meters = -1
 	slot.pos = nil
+	slot.color = nil
 	return slot
 end
 
 local POOL = CONFIG.MaxVisible
 State.Pool = {}
-for i = 1, POOL do
-	State.Pool[i] = newSlot()
-end
+for i = 1, POOL do State.Pool[i] = newSlot() end
 State.TopK = {}
-for i = 1, POOL do
-	State.TopK[i] = { idx = 0, d2 = 0 }
-end
+for i = 1, POOL do State.TopK[i] = { idx = 0, d2 = 0 } end
 
 local function hideCircleSegments(slot)
 	local segVis = slot.segVis
@@ -217,9 +214,7 @@ local function hideSlot(slot)
 end
 
 local function hideAllSlots()
-	for i = 1, POOL do
-		hideSlot(State.Pool[i])
-	end
+	for i = 1, POOL do hideSlot(State.Pool[i]) end
 end
 
 local function scanItems()
@@ -237,42 +232,45 @@ local function scanItems()
 				local meta = itemType and ITEM_META[itemType]
 				if meta then
 					local pos = box.Position
-					local cy = pos.Y - CircleOffsetY
-					local world = {}
-					for i = 1, Segments do
-						local off = CircleOffsets[i]
-						world[i] = Vector3.new(pos.X + off.X, cy, pos.Z + off.Z)
-					end
 					out[#out + 1] = {
 						Part = box,
 						ItemType = itemType,
 						Meta = meta,
 						Pos = pos,
-						CircleWorld = world,
-						ScreenPos = nil,
-						OnScreen = false,
-						ProjCam = nil,
-						ProjEpoch = -1,
-						CircleProjCam = nil,
-						CircleProjEpoch = -1,
+						CircleWorld = {},
 						CircleScreen = {},
 						CircleOn = {},
+						ScreenPos = Vector2.new(0, 0),
+						OnScreen = false,
+						ProjEpoch = -1,
+						CircleProjEpoch = -1,
 					}
 				end
 			end
 		end
 	end
+	for _, data in ipairs(out) do
+		local pos = data.Pos
+		local cy = pos.Y - CircleOffsetY
+		local w = data.CircleWorld
+		for j = 1, Segments do
+			local off = CircleOffsets[j]
+			w[j] = Vector3.new(pos.X + off.X, cy, pos.Z + off.Z)
+		end
+	end
 	State.Items = out
 end
 
-local lastCamCF, lastCharPos, lastViewport, lastFov, lastUpdate = nil, nil, nil, nil, 0
+local lastRender = 0
+local projEpoch = 0
+local lastCamCF, lastCharPos, lastViewport, lastFov
 
 local function renderEsp()
-	if _G.MatchaItemScript_RunId ~= MainRunId then return end
+	if _G.TWR_Patched_RunId ~= MainRunId then return end
 
 	local now = tick()
-	if now - lastUpdate < CONFIG.UpdateInterval then return end
-	lastUpdate = now
+	if now - lastRender < CONFIG.RenderInterval then return end
+	lastRender = now
 
 	local camera = Workspace.CurrentCamera
 	if not camera then hideAllSlots() return end
@@ -283,47 +281,41 @@ local function renderEsp()
 	local camCF = camera.CFrame
 	local vp = camera.ViewportSize
 	local fov = camera.FieldOfView
-	local movedCam = camCF ~= lastCamCF or vp ~= lastViewport or fov ~= lastFov
+	local movedCam = (camCF ~= lastCamCF) or (vp ~= lastViewport) or (fov ~= lastFov)
 	local movedChar = charPos ~= lastCharPos
-	if vp ~= lastViewport or fov ~= lastFov then
-		State.ProjEpoch = State.ProjEpoch + 1
+	if (vp ~= lastViewport) or (fov ~= lastFov) then
+		projEpoch = projEpoch + 1
 	end
 	lastCamCF, lastCharPos, lastViewport, lastFov = camCF, charPos, vp, fov
 
 	local items = State.Items
 	local cont = State.ItemsContainer
 
-	local changed = false
 	for i = #items, 1, -1 do
 		local data = items[i]
 		local part = data and data.Part
 		local model = part and part.Parent
 		if not (model and model.Parent == cont) then
 			table.remove(items, i)
-			changed = true
 		else
 			local pos = part.Position
 			if pos ~= data.Pos then
 				data.Pos = pos
 				local cy = pos.Y - CircleOffsetY
-				local world = data.CircleWorld
+				local w = data.CircleWorld
 				for j = 1, Segments do
 					local off = CircleOffsets[j]
-					world[j] = Vector3.new(pos.X + off.X, cy, pos.Z + off.Z)
+					w[j] = Vector3.new(pos.X + off.X, cy, pos.Z + off.Z)
 				end
-				data.ProjCam = nil
 				data.ProjEpoch = -1
-				data.CircleProjCam = nil
 				data.CircleProjEpoch = -1
-				changed = true
 			end
 		end
 	end
 
-	if not movedCam and not movedChar and not changed then return end
 	if #items == 0 then hideAllSlots() return end
 
-	local cx, cy, cz = charPos.X, charPos.Y, charPos.Z
+	local cx, cy_, cz = charPos.X, charPos.Y, charPos.Z
 	local topK = State.TopK
 	local maxD2 = MaxDistanceSq
 	local kCount = 0
@@ -331,40 +323,35 @@ local function renderEsp()
 	for i = 1, #items do
 		local data = items[i]
 		local p = data.Pos
-		local dx, dy, dz = p.X - cx, p.Y - cy, p.Z - cz
+		local dx, dy, dz = p.X - cx, p.Y - cy_, p.Z - cz
 		local d2 = dx * dx + dy * dy + dz * dz
 		if d2 <= maxD2 then
-			if data.ProjCam ~= camCF or data.ProjEpoch ~= State.ProjEpoch then
-				local sp, on = WorldToScreen(p)
-				data.ScreenPos = sp
-				data.OnScreen = on
-				data.ProjCam = camCF
-				data.ProjEpoch = State.ProjEpoch
-			end
-			if data.OnScreen then
-				if kCount < POOL then
-					kCount = kCount + 1
-					local pos = kCount
-					topK[pos].idx = i
-					topK[pos].d2 = d2
-					while pos > 1 and topK[pos].d2 < topK[pos - 1].d2 do
-						topK[pos].idx, topK[pos - 1].idx = topK[pos - 1].idx, topK[pos].idx
-						topK[pos].d2, topK[pos - 1].d2 = topK[pos - 1].d2, topK[pos].d2
-						pos = pos - 1
-					end
-				elseif d2 < topK[POOL].d2 then
-					topK[POOL].idx = i
-					topK[POOL].d2 = d2
-					local pos = POOL
-					while pos > 1 and topK[pos].d2 < topK[pos - 1].d2 do
-						topK[pos].idx, topK[pos - 1].idx = topK[pos - 1].idx, topK[pos].idx
-						topK[pos].d2, topK[pos - 1].d2 = topK[pos - 1].d2, topK[pos].d2
-						pos = pos - 1
-					end
+			if kCount < POOL then
+				kCount = kCount + 1
+				local pos = kCount
+				topK[pos].idx = i
+				topK[pos].d2 = d2
+				while pos > 1 and topK[pos].d2 < topK[pos - 1].d2 do
+					topK[pos].idx, topK[pos - 1].idx = topK[pos - 1].idx, topK[pos].idx
+					topK[pos].d2, topK[pos - 1].d2 = topK[pos - 1].d2, topK[pos].d2
+					pos = pos - 1
+				end
+			elseif d2 < topK[POOL].d2 then
+				topK[POOL].idx = i
+				topK[POOL].d2 = d2
+				local pos = POOL
+				while pos > 1 and topK[pos].d2 < topK[pos - 1].d2 do
+					topK[pos].idx, topK[pos - 1].idx = topK[pos - 1].idx, topK[pos].idx
+					topK[pos].d2, topK[pos - 1].d2 = topK[pos - 1].d2, topK[pos].d2
+					pos = pos - 1
 				end
 			end
 		end
 	end
+
+	if kCount == 0 then hideAllSlots() return end
+
+	local doProj = movedCam or movedChar
 
 	for slotIdx = 1, POOL do
 		local slot = State.Pool[slotIdx]
@@ -393,54 +380,63 @@ local function renderEsp()
 				if slot.label then slot.label.Color = color end
 			end
 
-			local sp = data.ScreenPos
-			local cur = slot.pos
-			local lx = sp.X
-			local ly = sp.Y - CONFIG.TextYOffset
-			if not cur or cur.X ~= lx or cur.Y ~= ly then
-				slot.pos = Vector2.new(lx, ly)
-				if slot.label then slot.label.Position = slot.pos end
+			if data.ProjEpoch ~= projEpoch or doProj then
+				local sp, on = WorldToScreen(data.Pos)
+				data.ScreenPos = sp
+				data.OnScreen = on
+				data.ProjEpoch = projEpoch
 			end
 
-			if not slot.visible then
-				slot.visible = true
-				if slot.label then slot.label.Visible = true end
-			end
-
-			local segCount = slot.segCount
-			if alpha <= 0 or segCount == 0 then
-				hideCircleSegments(slot)
+			if not data.OnScreen then
+				hideSlot(slot)
 			else
-				if data.CircleProjCam ~= camCF or data.CircleProjEpoch ~= State.ProjEpoch then
-					local w = data.CircleWorld
+				local sp = data.ScreenPos
+				local cur = slot.pos
+				local lx = sp.X
+				local ly = sp.Y - CONFIG.TextYOffset
+				if not cur or cur.X ~= lx or cur.Y ~= ly then
+					slot.pos = Vector2.new(lx, ly)
+					if slot.label then slot.label.Position = slot.pos end
+				end
+				if not slot.visible then
+					slot.visible = true
+					if slot.label then slot.label.Visible = true end
+				end
+
+				local segCount = slot.segCount
+				if alpha <= 0 or segCount == 0 then
+					hideCircleSegments(slot)
+				else
+					if data.CircleProjEpoch ~= projEpoch or doProj then
+						local w = data.CircleWorld
+						local cs = data.CircleScreen
+						local co = data.CircleOn
+						for j = 1, segCount do
+							local sp2, on2 = WorldToScreen(w[j])
+							cs[j] = sp2
+							co[j] = on2
+						end
+						data.CircleProjEpoch = projEpoch
+					end
 					local cs = data.CircleScreen
 					local co = data.CircleOn
+					local circle = slot.circle
+					local from, to, transp = slot.from, slot.to, slot.transp
+					local segVis = slot.segVis
 					for j = 1, segCount do
-						local sp2, on2 = WorldToScreen(w[j])
-						cs[j] = sp2
-						co[j] = on2
-					end
-					data.CircleProjCam = camCF
-					data.CircleProjEpoch = State.ProjEpoch
-				end
-				local cs = data.CircleScreen
-				local co = data.CircleOn
-				local circle = slot.circle
-				local from, to, transp = slot.from, slot.to, slot.transp
-				local segVis = slot.segVis
-				for j = 1, segCount do
-					local k = (j % segCount) + 1
-					if co[j] and co[k] then
-						local seg = circle[j]
-						local a = cs[j]
-						local b = cs[k]
-						if from[j] ~= a then from[j] = a; seg.From = a end
-						if to[j] ~= b then to[j] = b; seg.To = b end
-						if transp[j] ~= alpha then transp[j] = alpha; seg.Transparency = alpha end
-						if not segVis[j] then segVis[j] = true; seg.Visible = true end
-					elseif segVis[j] then
-						segVis[j] = false
-						circle[j].Visible = false
+						local k = (j % segCount) + 1
+						if co[j] and co[k] then
+							local seg = circle[j]
+							local a = cs[j]
+							local b = cs[k]
+							if from[j] ~= a then from[j] = a; seg.From = a end
+							if to[j] ~= b then to[j] = b; seg.To = b end
+							if transp[j] ~= alpha then transp[j] = alpha; seg.Transparency = alpha end
+							if not segVis[j] then segVis[j] = true; seg.Visible = true end
+						elseif segVis[j] then
+							segVis[j] = false
+							circle[j].Visible = false
+						end
 					end
 				end
 			end
@@ -450,35 +446,18 @@ local function renderEsp()
 	end
 end
 
+local TargetHeadSize = Vector3.new(CONFIG.HeadSize, CONFIG.HeadSize, CONFIG.HeadSize)
+
 local function updateZombieHeads()
 	local cont = getInfectedContainer()
 	if not cont then return end
-	local seen = {}
 	for _, zombie in ipairs(cont:GetChildren()) do
 		local hum = zombie:FindFirstChildOfClass("Humanoid")
 		if hum and hum.Health > 0 then
 			local head = zombie:FindFirstChild("Head")
-			if head then
-				local key = zombie.Address or tostring(zombie)
-				seen[key] = true
-				local tracked = State.ZombieHeads[key]
-				if head.Size ~= TargetHeadSize then
-					tracked = { zombie = zombie, head = head, orig = head.Size }
-					State.ZombieHeads[key] = tracked
-					head.Size = TargetHeadSize
-				elseif not tracked then
-					tracked = { zombie = zombie, head = head, orig = head.Size }
-					State.ZombieHeads[key] = tracked
-				end
+			if head and head.Size ~= TargetHeadSize then
+				head.Size = TargetHeadSize
 			end
-		end
-	end
-	for key, tracked in pairs(State.ZombieHeads) do
-		if not seen[key] then
-			local zombie = tracked.zombie
-			local head = zombie and zombie:FindFirstChild("Head")
-			pcall(function() (head or tracked.head).Size = tracked.orig end)
-			State.ZombieHeads[key] = nil
 		end
 	end
 end
@@ -533,9 +512,9 @@ local function refreshAllRanks()
 end
 
 local function rankWorker()
-	while _G.MatchaItemScript_RunId == MainRunId do
+	while _G.TWR_Patched_RunId == MainRunId do
 		task.wait(CONFIG.RankRefreshInterval)
-		if _G.MatchaItemScript_RunId ~= MainRunId then break end
+		if _G.TWR_Patched_RunId ~= MainRunId then break end
 		local players = Players:GetPlayers()
 		local picked
 		for i = 1, #players do
@@ -593,6 +572,8 @@ if CONFIG.RankRefreshInterval > 0 then
 	end)
 end
 
-_G.MatchaItemScript_RenderConn = RunService.RenderStepped:Connect(renderEsp)
+_G.TWR_Patched_RenderConn = RunService.RenderStepped:Connect(renderEsp)
 
-if notify then pcall(function() notify("Loaded", "", 3) end) end
+if notify then pcall(function() notify("Loaded (patched)", "", 3) end) end
+
+print("[TWR patched] RunId=" .. MainRunId .. " pool=" .. POOL)
