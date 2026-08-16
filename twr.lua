@@ -7,8 +7,8 @@ local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
 	MaxVisible = 5,
-	MaxDistance = 70,
-	UpdateInterval = 0.022,
+	MaxDistance = 75,
+	UpdateInterval = 0.03,
 	ScanInterval = 0.5,
 	TextSize = 18,
 	HeadSize = 5,
