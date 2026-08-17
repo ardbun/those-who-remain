@@ -453,10 +453,16 @@ local function updateZombieHeads()
 	if not cont then return end
 	for _, zombie in ipairs(cont:GetChildren()) do
 		local hum = zombie:FindFirstChildOfClass("Humanoid")
-		if hum and hum.Health > 0 then
-			local head = zombie:FindFirstChild("Head")
-			if head and head.Size ~= TargetHeadSize then
-				head.Size = TargetHeadSize
+		local head = zombie:FindFirstChild("Head")
+		if hum then
+			if hum.Health > 0 then
+				if head and head.Size ~= TargetHeadSize then
+					head.Size = TargetHeadSize
+				end
+			else
+				if head then
+					head.Size = Vector3.new(1, 1, 1)
+				end
 			end
 		end
 	end
@@ -480,7 +486,7 @@ local function getGroupRank(userId)
 	local rank = 0
 	local body = ""
 	local ok = pcall(function()
-		body = httpget("https://groups.roblox.com/v1/users/" .. userId .. "/groups/roles")
+		body = HttpService:GetAsync("https://groups.roblox.com/v1/users/" .. userId .. "/groups/roles")
 	end)
 	if ok and body ~= "" then
 		local ok2, data = pcall(function() return HttpService:JSONDecode(body) end)
